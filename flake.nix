@@ -7,78 +7,92 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
-    {
-      nixosModules.default = { lib, config, pkgs, ... }:
-        with lib;
-        let
-          cfg = config.services.multicast-relay;
-        in
-        {
-          options.services.multicast-relay = {
-            enable = mkEnableOption "Enable the Python multicast-relay";
+    let
+      overlay = final: prev: {
+        multicast-relay = final.python3Packages.buildPythonApplication {
+          pname = "multicast-relay";
+          version = "1.0";
+          src = ./.;
+          format = "other";
+          propagatedBuildInputs = with final.python3Packages; [ netifaces ];
+          installPhase = ''
+            mkdir -p $out/bin
+            cp multicast-relay.py $out/bin/multicast-relay.py
+            chmod +x $out/bin/multicast-relay.py
+            ln -s $out/bin/multicast-relay.py $out/bin/multicast-relay
+          '';
+          meta.description = "Multicast relay written in Python using netifaces";
+        };
+      };
+    in
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = import nixpkgs { inherit system; overlays = [ overlay ]; };
+      in {
+        packages.default = pkgs.multicast-relay;
+
+        devShells.default = pkgs.mkShell {
+          buildInputs = [ pkgs.multicast-relay ];
+        };
+
+        nixosModules.default = { config, lib, ... }: {
+          options.services.multicast-relay = with lib; {
+            enable = mkEnableOption "Enable multicast-relay";
 
             interfaces = mkOption {
               type = types.listOf types.str;
-              description = "List of interfaces to relay between (min 2)";
+              description = "Interfaces to relay between";
             };
 
             relays = mkOption {
               type = types.listOf types.str;
               default = [ "239.255.255.250:1900" ];
-              description = "List of multicast or broadcast IP:PORT pairs to relay.";
-            };
-
-            noTransmitInterfaces = mkOption {
-              type = types.listOf types.str;
-              default = [ ];
-              description = "Interfaces to receive from but not transmit to.";
+              description = "Multicast or broadcast targets";
             };
 
             masqueradeInterfaces = mkOption {
               type = types.listOf types.str;
-              default = [ ];
-              description = "Interfaces from which to masquerade packets (rewrite source IP).";
+              default = [];
+              description = "Interfaces to masquerade from";
             };
 
             extraArgs = mkOption {
               type = types.listOf types.str;
-              default = [ ];
-              description = "Additional command line arguments for multicast-relay.";
+              default = [];
+              description = "Extra command-line arguments";
             };
 
             logFile = mkOption {
               type = types.str;
               default = "/var/log/multicast-relay.log";
-              description = "Log file path for multicast-relay.";
+              description = "Log file path";
             };
 
             package = mkOption {
               type = types.package;
-              default = pkgs.multicast-relay;
-              description = "Package to use for the multicast-relay service.";
+              default = config.pkgs.multicast-relay;
+              defaultText = "pkgs.multicast-relay";
+              description = "Package to use";
             };
           };
 
-          config = mkIf cfg.enable {
+          config = lib.mkIf config.services.multicast-relay.enable {
             systemd.services.multicast-relay = {
-              description = "Python-based Multicast Relay";
+              description = "Multicast Relay Service";
               after = [ "network.target" ];
               wantedBy = [ "multi-user.target" ];
-
               serviceConfig = {
-                Type = "simple";
-                ExecStart = concatStringsSep " " ([
-                  "${cfg.package}/bin/multicast-relay"
-                  "--foreground"
-                  "--verbose"
-                  "--logfile ${cfg.logFile}"
-                ]
-                ++ (map (iface: "--interfaces ${iface}") cfg.interfaces)
-                ++ (map (relay: "--relay ${relay}") cfg.relays)
-                ++ (map (noTx: "--noTransmitInterfaces ${noTx}") cfg.noTransmitInterfaces)
-                ++ (map (masq: "--masquerade ${masq}") cfg.masqueradeInterfaces)
-                ++ cfg.extraArgs);
-
+                ExecStart = lib.concatStringsSep " " (
+                  [ "${config.services.multicast-relay.package}/bin/multicast-relay"
+                    "--foreground"
+                    "--verbose"
+                    "--logfile ${config.services.multicast-relay.logFile}"
+                  ]
+                  ++ (map (i: "--interfaces ${i}") config.services.multicast-relay.interfaces)
+                  ++ (map (r: "--relay ${r}") config.services.multicast-relay.relays)
+                  ++ (map (m: "--masquerade ${m}") config.services.multicast-relay.masqueradeInterfaces)
+                  ++ config.services.multicast-relay.extraArgs
+                );
                 Restart = "always";
                 RestartSec = 5;
                 StandardOutput = "journal";
@@ -86,48 +100,6 @@
               };
             };
           };
-
-
         };
-    } //
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [
-            (final: prev: {
-              multicast-relay = final.python3Packages.buildPythonApplication {
-                pname = "multicast-relay";
-                version = "1.0";
-
-                src = ./.;
-
-                format = "other"; # not a Python package with setup.py
-
-                propagatedBuildInputs = with final.python3Packages; [ netifaces ];
-
-                installPhase = ''
-                  mkdir -p $out/bin
-                  cp multicast-relay.py $out/bin/multicast-relay.py
-                  chmod +x $out/bin/multicast-relay.py
-                  ln -s $out/bin/multicast-relay.py $out/bin/multicast-relay
-                '';
-
-                meta = {
-                  description = "Multicast relay written in Python using netifaces";
-                  maintainers = with final.lib.maintainers; [ ];
-                };
-              };
-            })
-          ];
-        };
-      in
-      {
-        packages.default = pkgs.multicast-relay;
-
-        devShells.default = pkgs.mkShell {
-          buildInputs = [ pkgs.multicast-relay ];
-        };
-      }
-    );
+      });
 }
